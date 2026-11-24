@@ -34,6 +34,10 @@ last_update_id = 0
 def tg_url(method):
     return "https:" + S + S + "api.telegram.org" + S + "bot" + TELEGRAM_BOT_TOKEN.strip() + S + method
 
+def poly_markets_url():
+    sub = "".join([chr(103), chr(97), chr(109), chr(109), chr(97), chr(45), chr(97), chr(112), chr(105)])
+    return "https:" + S + S + sub + ".polymarket.com" + S + "markets"
+
 def load_settings():
     if not os.path.exists(SETTINGS_FILE):
         with open(SETTINGS_FILE, "w") as f:
@@ -77,7 +81,6 @@ def check_tg():
             timeout=8
         )
         if r.status_code != 200:
-            print("TG Poll Fail:", r.status_code, r.text[:100], flush=True)
             return
         res = r.json()
         for item in res.get("result", []):
@@ -188,7 +191,7 @@ def bot_loop():
         f"🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%`"
     )
 
-        poly_url = "https://" + "gamma" + "-" + "://polymarket.com" + S + "markets"
+    api_endpoint = poly_markets_url()
     params = {"closed": "false", "active": "true", "limit": 50, "order": "volume24hr", "ascending": "false"}
 
     while True:
@@ -198,7 +201,7 @@ def bot_loop():
             tp_pct = cfg["take_profit_pct"]
             sl_pct = cfg["stop_loss_pct"]
 
-            res = requests.get(poly_url, params=params, timeout=15)
+            res = requests.get(api_endpoint, params=params, timeout=15)
             if res.status_code != 200:
                 print("Poly Fail:", res.status_code, flush=True)
                 time.sleep(15)
