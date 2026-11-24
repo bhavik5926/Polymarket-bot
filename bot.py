@@ -6,10 +6,8 @@ import requests
 from flask import Flask
 from datetime import datetime, timezone
 
-# ================= TELEGRAM सेटिंग्स =================
 TELEGRAM_BOT_TOKEN = "9256114967:AAFQ4MsUQbb26EGjtZM1H9P1VX5uTFaMzIc"
 TELEGRAM_CHAT_ID = "8466057689"
-# ====================================================
 
 app = Flask(__name__)
 
@@ -19,18 +17,21 @@ def home():
 
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
-    "take_profit_pct": 20.0,    # मुनाफा लक्ष्य (+20%)
-    "stop_loss_pct": -8.0,      # नुकसान सीमा (-8%)
-    "risk_per_trade_pct": 15.0, # हर ट्रेड में कुल इक्विटी का 15% लगेगा
-    "max_open_trades": 4,       # अधिकतम 4 ओपन ट्रेड्स
-    "min_ai_score": 75,         # AI Score >= 75
-    "min_volume_usd": 75000     # कम से कम $75k वॉल्यूम
+    "take_profit_pct": 20.0,
+    "stop_loss_pct": -8.0,
+    "risk_per_trade_pct": 15.0,
+    "max_open_trades": 4,
+    "min_ai_score": 75,
+    "min_volume_usd": 75000
 }
 
-balance = 100.0  # लो-बैलेंस टेस्टिंग ($100 से शुरुआत)
+balance = 100.0
 positions = {}
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 last_update_id = 0
+
+def tg_base_url():
+    return "https://telegram.org" + "bot" + TELEGRAM_BOT_TOKEN.strip()
 
 def load_settings():
     if not os.path.exists(SETTINGS_FILE):
@@ -55,24 +56,21 @@ def get_total_equity(live_prices=None):
     return balance + open_val
 
 def send_tg(msg):
-    token = TELEGRAM_BOT_TOKEN.strip()
-    chat_id = str(TELEGRAM_CHAT_ID).strip()
     try:
-        api = f"https://telegram.org{token}/sendMessage"
-        r = requests.post(api, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        url = tg_base_url() + "/sendMessage"
+        r = requests.post(url, json={"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": msg, "parse_mode": "Markdown"}, timeout=10)
         if r.status_code != 200:
-            print(f"Telegram Send Error: {r.text}", flush=True)
+            print("TG Send Error:", r.text, flush=True)
     except Exception as e:
-        print(f"Telegram Exception: {e}", flush=True)
+        print("TG Exception:", e, flush=True)
 
 def check_tg():
     global last_update_id
-    token = TELEGRAM_BOT_TOKEN.strip()
     try:
-        api = f"https://telegram.org{token}/getUpdates?offset={last_update_id + 1}&timeout=1"
-        res = requests.get(api, timeout=8).json()
+        url = tg_base_url() + "/getUpdates?offset=" + str(last_update_id + 1) + "&timeout=1"
+        res = requests.get(url, timeout=8).json()
         if not res.get("ok"):
-            print(f"Telegram Token Error: {res}", flush=True)
+            print("TG Token Error:", res, flush=True)
             return
 
         for item in res.get("result", []):
@@ -86,15 +84,15 @@ def check_tg():
 
             cfg = load_settings()
             if text.startswith("/tp "):
-                cfg["take_profit_pct"] = abs(float(text.split()))
+                cfg["take_profit_pct"] = abs(float(text.split()[1]))
                 save_settings(cfg)
                 send_tg(f"✅ *TP अपडेट:* `+{cfg['take_profit_pct']}%`")
             elif text.startswith("/sl "):
-                cfg["stop_loss_pct"] = -abs(float(text.split()))
+                cfg["stop_loss_pct"] = -abs(float(text.split()[1]))
                 save_settings(cfg)
                 send_tg(f"🛑 *SL अपडेट:* `{cfg['stop_loss_pct']}%`")
             elif text.startswith("/risk "):
-                cfg["risk_per_trade_pct"] = abs(float(text.split()))
+                cfg["risk_per_trade_pct"] = abs(float(text.split()[1]))
                 save_settings(cfg)
                 send_tg(f"⚖️ *Auto-Equity साइज अपडेट:* अब प्रति ट्रेड इक्विटी का `{cfg['risk_per_trade_pct']}%` लगेगा।")
             elif text in ["/status", "/start"]:
@@ -112,13 +110,13 @@ def check_tg():
                     f"📂 ओपन ट्रेड्स: `{len(positions)}/{cfg['max_open_trades']}`"
                 )
     except Exception as e:
-        print(f"Check TG Error: {e}", flush=True)
+        print("Check TG Error:", e, flush=True)
 
 def get_yes_no_prices(market):
     try:
         prices = json.loads(market.get("outcomePrices", "[]"))
         if len(prices) >= 2:
-            return float(prices), float(prices)
+            return float(prices[0]), float(prices[1])
     except Exception:
         pass
     return None, None
@@ -184,7 +182,8 @@ def bot_loop():
         f"🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%`"
     )
 
-    api_url = "https://polymarket.com"
+    host = "https://" + "gamma-api" + ".polymarket.com"
+    params = {"closed": "false", "active": "true", "limit": 50, "order": "volume24hr", "ascending": "false"}
 
     while True:
         try:
@@ -193,7 +192,8 @@ def bot_loop():
             tp_pct = cfg["take_profit_pct"]
             sl_pct = cfg["stop_loss_pct"]
 
-            markets = requests.get(api_url, timeout=15).json()
+            res = requests.get(host + "/markets", params=params, timeout=15)
+            markets = res.json()
             live_prices = {}
             for m in markets:
                 yp, _ = get_yes_no_prices(m)
@@ -247,7 +247,7 @@ def bot_loop():
 
             time.sleep(15)
         except Exception as e:
-            print(f"Loop Error: {e}", flush=True)
+            print("Loop Error:", e, flush=True)
             time.sleep(10)
 
 threading.Thread(target=bot_loop, daemon=True).start()
