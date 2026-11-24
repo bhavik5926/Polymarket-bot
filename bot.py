@@ -188,7 +188,7 @@ def bot_loop():
         f"🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%`"
     )
 
-    poly_url = "https:" + S + S + "://polymarket.com" + S + "markets"
+        poly_url = "https://" + "gamma" + "-" + "://polymarket.com" + S + "markets"
     params = {"closed": "false", "active": "true", "limit": 50, "order": "volume24hr", "ascending": "false"}
 
     while True:
