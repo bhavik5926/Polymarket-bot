@@ -1,5 +1,4 @@
 import os
-import csv
 import time
 import json
 import threading
@@ -19,18 +18,16 @@ def home():
     return "Polymarket AI Bot is Running 24/7!"
 
 SETTINGS_FILE = "settings.json"
-CSV_REPORT_FILE = "trades_report.csv"
-
 DEFAULT_SETTINGS = {
-    "take_profit_pct": 25.0,
-    "stop_loss_pct": -10.0,
-    "trade_amount": 100.0,
-    "max_open_trades": 4,
-    "min_ai_score": 75,
-    "min_volume_usd": 75000
+    "take_profit_pct": 20.0,    # मुनाफा लक्ष्य (+20%)
+    "stop_loss_pct": -8.0,      # नुकसान सीमा (-8%)
+    "risk_per_trade_pct": 15.0, # हर ट्रेड में कुल इक्विटी का 15% लगेगा
+    "max_open_trades": 4,       # अधिकतम 4 ओपन ट्रेड्स
+    "min_ai_score": 75,         # AI Score >= 75
+    "min_volume_usd": 75000     # कम से कम $75k वॉल्यूम
 }
 
-balance = 1000.0
+balance = 100.0  # लो-बैलेंस टेस्टिंग ($100 से शुरुआत)
 positions = {}
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 last_update_id = 0
@@ -50,28 +47,41 @@ def save_settings(cfg):
     with open(SETTINGS_FILE, "w") as f:
         json.dump(cfg, f, indent=4)
 
+def get_total_equity(live_prices=None):
+    open_val = 0.0
+    for m_id, pos in positions.items():
+        p = live_prices.get(m_id, pos["entry"]) if live_prices else pos["entry"]
+        open_val += pos["shares"] * p
+    return balance + open_val
+
 def send_tg(msg):
-    if "YOUR_TELEGRAM" in TELEGRAM_BOT_TOKEN:
-        return
+    token = TELEGRAM_BOT_TOKEN.strip()
+    chat_id = str(TELEGRAM_CHAT_ID).strip()
     try:
-        api = "https://telegram.org" + TELEGRAM_BOT_TOKEN + "/sendMessage"
-        requests.post(api, json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"}, timeout=8)
-    except Exception:
-        pass
+        api = f"https://telegram.org{token}/sendMessage"
+        r = requests.post(api, json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram Send Error: {r.text}", flush=True)
+    except Exception as e:
+        print(f"Telegram Exception: {e}", flush=True)
 
 def check_tg():
     global last_update_id
-    if "YOUR_TELEGRAM" in TELEGRAM_BOT_TOKEN:
-        return
+    token = TELEGRAM_BOT_TOKEN.strip()
     try:
-        api = "https://telegram.org" + TELEGRAM_BOT_TOKEN + "/getUpdates?offset=" + str(last_update_id + 1) + "&timeout=1"
-        res = requests.get(api, timeout=5).json()
+        api = f"https://telegram.org{token}/getUpdates?offset={last_update_id + 1}&timeout=1"
+        res = requests.get(api, timeout=8).json()
+        if not res.get("ok"):
+            print(f"Telegram Token Error: {res}", flush=True)
+            return
+
         for item in res.get("result", []):
             last_update_id = item["update_id"]
             msg_obj = item.get("message", {})
             text = msg_obj.get("text", "").strip().lower()
-            chat_id = str(msg_obj.get("chat", {}).get("id", ""))
-            if chat_id != str(TELEGRAM_CHAT_ID):
+            incoming_id = str(msg_obj.get("chat", {}).get("id", ""))
+
+            if incoming_id != str(TELEGRAM_CHAT_ID).strip():
                 continue
 
             cfg = load_settings()
@@ -83,16 +93,26 @@ def check_tg():
                 cfg["stop_loss_pct"] = -abs(float(text.split()))
                 save_settings(cfg)
                 send_tg(f"🛑 *SL अपडेट:* `{cfg['stop_loss_pct']}%`")
-            elif text == "/status":
+            elif text.startswith("/risk "):
+                cfg["risk_per_trade_pct"] = abs(float(text.split()))
+                save_settings(cfg)
+                send_tg(f"⚖️ *Auto-Equity साइज अपडेट:* अब प्रति ट्रेड इक्विटी का `{cfg['risk_per_trade_pct']}%` लगेगा।")
+            elif text in ["/status", "/start"]:
                 tot = stats["wins"] + stats["losses"]
                 wr = (stats["wins"] / tot * 100) if tot > 0 else 0.0
+                eq = get_total_equity()
+                next_trade = eq * (cfg["risk_per_trade_pct"] / 100.0)
                 send_tg(
-                    f"📊 *स्टेटस (Render Cloud)*\n💰 कैश: `${balance:.2f}`\n📈 PnL: `${stats['total_pnl']:+.2f}`\n"
-                    f"🎯 Win Rate: `{wr:.1f}%` ({stats['wins']}W/{stats['losses']}L)\n"
-                    f"⚙️ TP: `+{cfg['take_profit_pct']}%` | SL: `{cfg['stop_loss_pct']}%`"
+                    f"📊 *POLYMARKET AI STATUS*\n"
+                    f"💎 कुल इक्विटी: `${eq:.2f}` (कैश: `${balance:.2f}`)\n"
+                    f"💵 अगला ट्रेड साइज़ ({cfg['risk_per_trade_pct']}%): `${next_trade:.2f}`\n"
+                    f"📈 कुल PnL: `${stats['total_pnl']:+.2f}`\n"
+                    f"🎯 Win Rate: `{wr:.1f}%` ({stats['wins']}W / {stats['losses']}L)\n"
+                    f"⚙️ TP: `+{cfg['take_profit_pct']}%` | SL: `{cfg['stop_loss_pct']}%`\n"
+                    f"📂 ओपन ट्रेड्स: `{len(positions)}/{cfg['max_open_trades']}`"
                 )
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Check TG Error: {e}", flush=True)
 
 def get_yes_no_prices(market):
     try:
@@ -113,7 +133,7 @@ def ai_score_market(market, cfg):
     chg_24h = float(market.get("oneDayPriceChange", 0))
     spread = abs(1.0 - (yes_p + no_p))
 
-    if vol < cfg["min_volume_usd"] or not (0.25 <= yes_p <= 0.68):
+    if vol < cfg["min_volume_usd"] or not (0.35 <= yes_p <= 0.65):
         return 0, None, ""
 
     end_str = market.get("endDate")
@@ -147,16 +167,22 @@ def ai_score_market(market, cfg):
     elif chg_24h > 0.12:
         score += 15
 
-    if 0.35 <= yes_p <= 0.58:
+    if 0.40 <= yes_p <= 0.60:
         score += 15
-        reasons.append("Sweet-Spot Odds")
+        reasons.append("Safe Odds")
 
     return score, yes_p, ", ".join(reasons)
 
 def bot_loop():
     global balance
+    print("Bot Background Thread Started!", flush=True)
     cfg = load_settings()
-    send_tg(f"🚀 *Polymarket AI Bot (Render 24/7) चालू!*\n💰 बैलेंस: `${balance:.2f}`\n🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%`")
+    send_tg(
+        f"🚀 *Polymarket AI Bot (Low-Balance Auto-Scaling) चालू!*\n"
+        f"💎 शुरुआती इक्विटी: `${balance:.2f}`\n"
+        f"⚖️ प्रति ट्रेड रिस्क: `{cfg['risk_per_trade_pct']}%`\n"
+        f"🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%`"
+    )
 
     api_url = "https://polymarket.com"
 
@@ -168,7 +194,6 @@ def bot_loop():
             sl_pct = cfg["stop_loss_pct"]
 
             markets = requests.get(api_url, timeout=15).json()
-
             live_prices = {}
             for m in markets:
                 yp, _ = get_yes_no_prices(m)
@@ -185,40 +210,48 @@ def bot_loop():
                     balance += pos["shares"] * curr_p
                     stats["wins"] += 1
                     stats["total_pnl"] += pnl_usd
-                    send_tg(f"✅ *TP HIT:* {pos['q']} | +${pnl_usd:.2f} (+{pnl_pct:.1f}%)")
+                    send_tg(f"✅ *TP HIT:* {pos['q']} | `+${pnl_usd:.2f}` (`+{pnl_pct:.1f}%`) | नया कैश: `${balance:.2f}`")
                     closed.append(m_id)
 
                 elif pnl_pct <= sl_pct:
                     balance += pos["shares"] * curr_p
                     stats["losses"] += 1
                     stats["total_pnl"] += pnl_usd
-                    send_tg(f"🔻 *SL HIT:* {pos['q']} | ${pnl_usd:.2f} ({pnl_pct:.1f}%)")
+                    send_tg(f"🔻 *SL HIT:* {pos['q']} | `${pnl_usd:.2f}` (`{pnl_pct:.1f}%`) | नया कैश: `${balance:.2f}`")
                     closed.append(m_id)
 
             for m_id in closed:
                 del positions[m_id]
 
-            if len(positions) < cfg["max_open_trades"] and balance >= cfg["trade_amount"]:
+            total_eq = get_total_equity(live_prices)
+            trade_amt = round(total_eq * (cfg["risk_per_trade_pct"] / 100.0), 2)
+
+            if len(positions) < cfg["max_open_trades"] and balance >= trade_amt and trade_amt >= 2.0:
                 for m in markets:
                     m_id = m.get("id")
                     if m_id in positions:
                         continue
                     score, price, reason = ai_score_market(m, cfg)
                     if score >= cfg["min_ai_score"] and price and price > 0:
-                        shares = cfg["trade_amount"] / price
-                        balance -= cfg["trade_amount"]
+                        shares = trade_amt / price
+                        balance -= trade_amt
                         q_short = m.get("question", "")[:42]
                         positions[m_id] = {"q": q_short, "entry": price, "shares": shares, "score": score}
-                        send_tg(f"🟢 *BUY (Score {score}):* {q_short} @ ${price:.3f} ({reason})")
+                        send_tg(
+                            f"🟢 *BUY (Score {score}):* {q_short}\n"
+                            f"💲 एंट्री: `${price:.3f}` | निवेश: `${trade_amt:.2f}` ({cfg['risk_per_trade_pct']}% इक्विटी)\n"
+                            f"🧠 कारण: {reason}"
+                        )
                         if len(positions) >= cfg["max_open_trades"]:
                             break
 
-            time.sleep(20)
+            time.sleep(15)
         except Exception as e:
-            print(f"Error: {e}")
+            print(f"Loop Error: {e}", flush=True)
             time.sleep(10)
 
+threading.Thread(target=bot_loop, daemon=True).start()
+
 if __name__ == "__main__":
-    threading.Thread(target=bot_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
