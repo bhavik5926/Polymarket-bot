@@ -4,24 +4,30 @@ import json
 import threading
 import requests
 from flask import Flask
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-TELEGRAM_BOT_TOKEN = "9256114967:AAFQ4MsUQbb26EGjtZM1H9P1VX5uTFaMzIc"
+# ================= सेटिंग्स और टोकन =================
+TELEGRAM_BOT_TOKEN = os.environ.get("TG_TOKEN", "9256114967:AAFQ4MsUQbb26EGjtZM1H9P1VX5uTFaMzIc")
 TELEGRAM_CHAT_ID = "8466057689"
+VIP_CHANNEL_ID = ""  # भविष्य में अपने VIP चैनल की ID (जैसे "-1001234567890") यहाँ डालें
+# ====================================================
 
 S = chr(47)
+IST = timezone(timedelta(hours=5, minutes=30))
 app = Flask(__name__)
 
 @app.route(S)
 def home():
-    return "Polymarket AI Bot Pro (Timer + Auto-Settle) is Running 24x7!"
+    return "Polymarket AI Pro Journal Bot is Running 24x7!"
 
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
-    "take_profit_pct": 20.0,
-    "stop_loss_pct": -8.0,
-    "risk_per_trade_pct": 15.0,
-    "max_hold_hours": 24.0,
+    "take_profit_pct": 15.0,      # आपका नया TP (+15%)
+    "stop_loss_pct": -8.0,        # Stop-Loss (-8%)
+    "breakeven_trigger": 10.0,    # +10% मुनाफे पर SL को +0.5% पर लॉक करेगा
+    "daily_loss_limit_pct": 10.0, # एक दिन में अधिकतम 10% नुकसान सीमा
+    "risk_per_trade_pct": 15.0,   # कुल इक्विटी का 15% प्रति ट्रेड
+    "max_hold_hours": 24.0,       # अधिकतम 24 घंटे होल्डिंग
     "max_open_trades": 4,
     "min_ai_score": 75,
     "min_volume_usd": 75000
@@ -29,8 +35,15 @@ DEFAULT_SETTINGS = {
 
 balance = 100.0
 positions = {}
+trade_journal = []
 stats = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 last_update_id = 0
+
+# दैनिक और साप्ताहिक ट्रैकिंग
+current_day_str = datetime.now(IST).strftime("%Y-%m-%d")
+day_start_equity = 100.0
+daily_paused = False
+last_weekly_report_week = ""
 
 def tg_url(method):
     return "https:" + S + S + "api.telegram.org" + S + "bot" + TELEGRAM_BOT_TOKEN.strip() + S + method
@@ -65,20 +78,74 @@ def get_total_equity(live_prices=None):
         open_val += pos["shares"] * p
     return balance + open_val
 
-def send_tg(msg):
+def send_tg(msg, target_chat=None):
+    chat = target_chat if target_chat else str(TELEGRAM_CHAT_ID).strip()
+    if not chat:
+        return
     try:
-        r = requests.post(
+        requests.post(
             tg_url("sendMessage"),
-            json={"chat_id": str(TELEGRAM_CHAT_ID).strip(), "text": msg, "parse_mode": "Markdown"},
+            json={"chat_id": chat, "text": msg, "parse_mode": "Markdown"},
             timeout=10
         )
-        if r.status_code != 200:
-            print("TG Send Fail:", r.status_code, r.text[:100], flush=True)
     except Exception as e:
         print("TG Send Err:", e, flush=True)
 
+def send_vip_signal(msg):
+    if VIP_CHANNEL_ID.strip():
+        send_tg(msg, target_chat=VIP_CHANNEL_ID.strip())
+
+def format_duration(seconds):
+    mins = int(seconds // 60)
+    hrs = mins // 60
+    rem_mins = mins % 60
+    return f"{hrs}h {rem_mins}m" if hrs > 0 else f"{rem_mins}m"
+
+def build_weekly_report():
+    now_ist = datetime.now(IST)
+    week_ago = now_ist - timedelta(days=7)
+    weekly_trades = [t for t in trade_journal if t["close_dt"] >= week_ago]
+    
+    if not weekly_trades:
+        return "📅 *WEEKLY PERFORMANCE REPORT*\nइस हफ्ते अभी तक कोई ट्रेड बंद नहीं हुआ है।"
+
+    w_wins = sum(1 for t in weekly_trades if t["pnl_usd"] >= 0)
+    w_losses = len(weekly_trades) - w_wins
+    w_pnl = sum(t["pnl_usd"] for t in weekly_trades)
+    w_wr = (w_wins / len(weekly_trades)) * 100
+    best_t = max(weekly_trades, key=lambda x: x["pnl_usd"])
+    worst_t = min(weekly_trades, key=lambda x: x["pnl_usd"])
+    eq = get_total_equity()
+
+    return (
+        f"📅 *WEEKLY PERFORMANCE REPORT (7 Days)*\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 कुल बंद ट्रेड्स: `{len(weekly_trades)}`\n"
+        f"🎯 साप्ताहिक Win Rate: `{w_wr:.1f}%` ({w_wins}W / {w_losses}L)\n"
+        f"💵 साप्ताहिक नेट PnL: `${w_pnl:+.2f}`\n"
+        f"💎 वर्तमान कुल इक्विटी: `${eq:.2f}`\n"
+        f"🏆 बेस्ट ट्रेड: `{best_t['q'][:28]}...` (`+${best_t['pnl_usd']:.2f}`)\n"
+        f"⚠️ सबसे खराब ट्रेड: `{worst_t['q'][:28]}...` (`${worst_t['pnl_usd']:+.2f}`)\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+def build_journal_summary():
+    if not trade_journal:
+        return "📓 *TRADE JOURNAL*\nअभी तक कोई ट्रेड बंद नहीं हुआ है। जैसे ही पहला ट्रेड TP/SL पर बंद होगा, यहाँ पूरा रिकॉर्ड दिखेगा!"
+    
+    recent = trade_journal[-8:]
+    lines = ["📓 *TRADE JOURNAL (आखिरी ट्रेड्स)*\n━━━━━━━━━━━━━━━━━━━━"]
+    for idx, t in enumerate(reversed(recent), 1):
+        icon = "✅" if t["pnl_usd"] >= 0 else "🔻"
+        lines.append(
+            f"{idx}. {icon} *{t['q'][:30]}...*\n"
+            f"   Score: `{t['score']}` | Entry: `${t['entry']:.3f}` ➔ Exit: `${t['exit']:.3f}`\n"
+            f"   PnL: `${t['pnl_usd']:+.2f}` (`{t['pnl_pct']:+.1f}%`) | ⏱ `{t['duration']}` | `{t['reason']}`"
+        )
+    return "\n".join(lines)
+
 def check_tg():
-    global last_update_id
+    global last_update_id, daily_paused
     try:
         r = requests.get(
             tg_url("getUpdates"),
@@ -112,19 +179,28 @@ def check_tg():
             elif text.startswith(S + "hold "):
                 cfg["max_hold_hours"] = abs(float(text.split()))
                 save_settings(cfg)
-                send_tg(f"⏳ *Max Hold टाइम अपडेट:* अब हर ट्रेड अधिकतम `{cfg['max_hold_hours']} घंटे` चलेगा।")
+                send_tg(f"⏳ *Max Hold टाइम:* `{cfg['max_hold_hours']} घंटे`")
+            elif text == S + "resume":
+                daily_paused = False
+                send_tg("▶️ *Daily Loss Pause हटाया गया:* बॉट फिर से नए ट्रेड्स लेगा।")
+            elif text == S + "journal":
+                send_tg(build_journal_summary())
+            elif text == S + "weekly":
+                send_tg(build_weekly_report())
             elif text in [S + "status", S + "start"]:
                 tot = stats["wins"] + stats["losses"]
                 wr = (stats["wins"] / tot * 100) if tot > 0 else 0.0
                 eq = get_total_equity()
                 next_trade = eq * (cfg["risk_per_trade_pct"] / 100.0)
+                daily_chg = ((eq - day_start_equity) / day_start_equity) * 100 if day_start_equity > 0 else 0.0
+                status_flag = "⏸ PAUSED (Daily Limit)" if daily_paused else "🟢 ACTIVE"
                 send_tg(
-                    f"📊 *POLYMARKET AI PRO STATUS*\n"
+                    f"📊 *POLYMARKET AI PRO STATUS* ({status_flag})\n"
                     f"💎 कुल इक्विटी: `${eq:.2f}` (कैश: `${balance:.2f}`)\n"
+                    f"📆 आज का बदलाव: `{daily_chg:+.2f}%` (Limit: `-{cfg['daily_loss_limit_pct']}%`)\n"
                     f"💵 अगला ट्रेड ({cfg['risk_per_trade_pct']}%): `${next_trade:.2f}`\n"
-                    f"📈 कुल PnL: `${stats['total_pnl']:+.2f}`\n"
-                    f"🎯 Win Rate: `{wr:.1f}%` ({stats['wins']}W / {stats['losses']}L)\n"
-                    f"⚙️ TP: `+{cfg['take_profit_pct']}%` | SL: `{cfg['stop_loss_pct']}%` | ⏳ `{cfg['max_hold_hours']}h`\n"
+                    f"📈 कुल PnL: `${stats['total_pnl']:+.2f}` | 🎯 Win Rate: `{wr:.1f}%` ({stats['wins']}W/{stats['losses']}L)\n"
+                    f"⚙️ TP: `+{cfg['take_profit_pct']}%` | SL: `{cfg['stop_loss_pct']}%` | 🔒 BE: `+{cfg['breakeven_trigger']}%`\n"
                     f"📂 ओपन ट्रेड्स: `{len(positions)}/{cfg['max_open_trades']}`"
                 )
     except Exception as e:
@@ -140,15 +216,13 @@ def get_yes_no_prices(market):
     return None, None
 
 def fetch_single_market_status(m_id):
-    """अगर मार्केट टॉप 50 से बाहर हो जाए तो उसकी फाइनल कीमत और बंद होने की स्थिति चेक करता है"""
     try:
         url = poly_base_url() + S + str(m_id)
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             m = r.json()
             yp, _ = get_yes_no_prices(m)
-            is_closed = bool(m.get("closed", False))
-            return yp, is_closed
+            return yp, bool(m.get("closed", False))
     except Exception:
         pass
     return None, False
@@ -188,90 +262,4 @@ def ai_score_market(market, cfg):
         score += 25
         reasons.append("Arbitrage")
     elif spread <= 0.02:
-        score += 20
-        reasons.append("Tight Spread")
-
-    if 0.03 <= chg_24h <= 0.12:
-        score += 30
-        reasons.append(f"Uptrend +{chg_24h*100:.1f}%")
-    elif chg_24h > 0.12:
-        score += 15
-
-    if 0.40 <= yes_p <= 0.60:
-        score += 15
-        reasons.append("Safe Odds")
-
-    return score, yes_p, ", ".join(reasons)
-
-def bot_loop():
-    global balance
-    print("Bot Pro Started Cleanly!", flush=True)
-    cfg = load_settings()
-    send_tg(
-        f"🚀 *Polymarket AI Pro Bot चालू!*\n"
-        f"💎 इक्विटी: `${balance:.2f}` | ⚖️ रिस्क: `{cfg['risk_per_trade_pct']}%`\n"
-        f"🎯 TP: `+{cfg['take_profit_pct']}%` | 🛑 SL: `{cfg['stop_loss_pct']}%` | ⏳ `{cfg['max_hold_hours']}h`\n"
-        f"✨ Auto-Settlement व Max-Hold Timer सक्रिय!"
-    )
-
-    api_endpoint = poly_base_url()
-    params = {"closed": "false", "active": "true", "limit": 50, "order": "volume24hr", "ascending": "false"}
-
-    while True:
-        try:
-            check_tg()
-            cfg = load_settings()
-            tp_pct = cfg["take_profit_pct"]
-            sl_pct = cfg["stop_loss_pct"]
-            max_hold_sec = cfg["max_hold_hours"] * 3600.0
-
-            res = requests.get(api_endpoint, params=params, timeout=15)
-            if res.status_code != 200:
-                print("Poly Fail:", res.status_code, flush=True)
-                time.sleep(15)
-                continue
-
-            markets = res.json()
-            live_prices = {}
-            for m in markets:
-                yp, _ = get_yes_no_prices(m)
-                if yp is not None:
-                    live_prices[m.get("id")] = yp
-
-            closed = []
-            now_ts = time.time()
-
-            for m_id, pos in positions.items():
-                is_settled = False
-                if m_id in live_prices:
-                    curr_p = live_prices[m_id]
-                else:
-                    # अगर मार्केट टॉप 50 लिस्ट से हट गया है तो सीधे उसका स्टेटस चेक करें
-                    fetched_p, is_settled = fetch_single_market_status(m_id)
-                    curr_p = fetched_p if fetched_p is not None else pos["entry"]
-
-                pnl_pct = ((curr_p - pos["entry"]) / pos["entry"]) * 100
-                pnl_usd = (curr_p - pos["entry"]) * pos["shares"]
-                held_sec = now_ts - pos.get("open_time", now_ts)
-
-                # 1. Auto-Settlement (मैच/इवेंट खत्म होने पर)
-                if is_settled:
-                    balance += pos["shares"] * curr_p
-                    if pnl_usd >= 0:
-                        stats["wins"] += 1
-                        send_tg(f"🏁 *EVENT SETTLED (WIN):* {pos['q']} | `+${pnl_usd:.2f}` (`+{pnl_pct:.1f}%`) | कैश: `${balance:.2f}`")
-                    else:
-                        stats["losses"] += 1
-                        send_tg(f"🏁 *EVENT SETTLED (LOSS):* {pos['q']} | `${pnl_usd:.2f}` (`{pnl_pct:.1f}%`) | कैश: `${balance:.2f}`")
-                    stats["total_pnl"] += pnl_usd
-                    closed.append(m_id)
-
-                # 2. Take-Profit हिट होने पर
-                elif pnl_pct >= tp_pct:
-                    balance += pos["shares"] * curr_p
-                    stats["wins"] += 1
-                    stats["total_pnl"] += pnl_usd
-                    send_tg(f"✅ *TP HIT:* {pos['q']} | `+${pnl_usd:.2f}` (`+{pnl_pct:.1f}%`) | कैश: `${balance:.2f}`")
-                    closed.append(m_id)
-
-                # 3. Stop-Loss हिट होने पर
+1
