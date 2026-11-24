@@ -31,7 +31,8 @@ stats = {"wins": 0, "losses": 0, "total_pnl": 0.0}
 last_update_id = 0
 
 def tg_base_url():
-    return "https://telegram.org" + "bot" + TELEGRAM_BOT_TOKEN.strip()
+    return "https://telegram.org" + chr(47) + "bot" + TELEGRAM_BOT_TOKEN.strip()
+    
 
 def load_settings():
     if not os.path.exists(SETTINGS_FILE):
